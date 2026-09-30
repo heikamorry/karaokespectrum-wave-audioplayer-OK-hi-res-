@@ -34,6 +34,10 @@ void KaraokeWidget::setLyricsController(LyricsController *controller)
                 this, [this](int) { update(); });
         connect(m_controller, &LyricsController::progressChanged,
                 this, [this](qreal) { update(); });
+        connect(m_controller, &QObject::destroyed, this, [this] {
+            m_controller = nullptr;
+            update();
+        });
     }
 
     update();
@@ -57,14 +61,9 @@ void KaraokeWidget::paintEvent(QPaintEvent *event)
     p.setRenderHint(QPainter::Antialiasing, true);
     p.setRenderHint(QPainter::TextAntialiasing, true);
 
-    p.fillRect(rect(), QColor(12, 14, 18));
-
-    QRect drawRect = rect().adjusted(12, 12, -12, -12);
+    QRect drawRect = rect().adjusted(8, 6, -8, -6);
     if (drawRect.width() <= 0 || drawRect.height() <= 0)
         return;
-
-    p.setPen(QPen(QColor(50, 55, 65), 1));
-    p.drawRect(drawRect);
 
     const int lineSpacing = 10;
     const int topHeight = drawRect.height() / 4;
@@ -96,7 +95,7 @@ void KaraokeWidget::paintEvent(QPaintEvent *event)
     if (!m_controller || !m_controller->hasLyrics()) {
         drawCenteredText(p, currRect,
                          QStringLiteral("暂无歌词"),
-                         QColor(150, 158, 170),
+                         QColor(142, 142, 147),
                          currentFont);
         return;
     }
@@ -108,7 +107,7 @@ void KaraokeWidget::paintEvent(QPaintEvent *event)
 
     if (!prevText.isEmpty()) {
         drawCenteredText(p, prevRect, prevText,
-                         QColor(125, 132, 145),
+                         QColor(142, 142, 147),
                          prevNextFont);
     }
 
@@ -117,13 +116,13 @@ void KaraokeWidget::paintEvent(QPaintEvent *event)
     } else {
         drawCenteredText(p, currRect,
                          QStringLiteral("♪"),
-                         QColor(150, 158, 170),
+                         QColor(174, 174, 178),
                          currentFont);
     }
 
     if (!nextText.isEmpty()) {
         drawCenteredText(p, nextRect, nextText,
-                         QColor(125, 132, 145),
+                         QColor(142, 142, 147),
                          prevNextFont);
     }
 }
@@ -147,23 +146,18 @@ void KaraokeWidget::drawCurrentLine(QPainter &p, const QRect &rect, const QStrin
     p.setFont(font);
 
     QFontMetrics fm(font);
-    const int textWidth = fm.horizontalAdvance(text);
-    const int textHeight = fm.height();
+    const int flags = Qt::AlignCenter | Qt::TextWordWrap;
+    const QRect textRect = fm.boundingRect(rect, flags, text);
 
-    QRect textRect(rect.center().x() - textWidth / 2,
-                   rect.center().y() - textHeight / 2,
-                   textWidth,
-                   textHeight);
-
-    p.setPen(QColor(95, 100, 110));
+    p.setPen(QColor(174, 174, 178));
     p.drawText(rect, Qt::AlignCenter | Qt::TextWordWrap, text);
 
     QRect clipRect = textRect;
-    clipRect.setWidth(int(textRect.width() * progress));
+    clipRect.setWidth(qRound(textRect.width() * progress));
 
     p.save();
     p.setClipRect(clipRect);
-    p.setPen(QColor(80, 230, 160));
+    p.setPen(QColor(250, 45, 85));
     p.drawText(rect, Qt::AlignCenter | Qt::TextWordWrap, text);
     p.restore();
 

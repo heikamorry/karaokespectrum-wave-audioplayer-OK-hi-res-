@@ -8,7 +8,7 @@
 SpectrumWidget::SpectrumWidget(QWidget *parent)
     : QWidget(parent)
 {
-    setMinimumHeight(180);
+    setMinimumHeight(72);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setAutoFillBackground(false);
 }
@@ -34,26 +34,20 @@ void SpectrumWidget::paintEvent(QPaintEvent *event)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
 
-    p.fillRect(rect(), QColor(18, 20, 26));
-
-    QRect drawRect = rect().adjusted(10, 10, -10, -10);
+    const QRect drawRect = rect().adjusted(6, 6, -6, -6);
     if (drawRect.width() <= 0 || drawRect.height() <= 0)
         return;
 
-    const int waveHeight = drawRect.height() * 4 / 10;
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(247, 247, 250));
+    p.drawRoundedRect(drawRect, 10, 10);
+
+    const int waveHeight = drawRect.height() * 35 / 100;
     const QRect waveRect(drawRect.left(), drawRect.top(), drawRect.width(), waveHeight);
     const QRect barsRect(drawRect.left(),
-                         waveRect.bottom() + 8,
+                         waveRect.bottom() + 5,
                          drawRect.width(),
-                         drawRect.bottom() - (waveRect.bottom() + 8) + 1);
-
-    p.setPen(QPen(QColor(50, 55, 65), 1));
-    p.drawRect(drawRect);
-
-    for (int i = 1; i < 4; ++i) {
-        const int y = barsRect.top() + i * barsRect.height() / 4;
-        p.drawLine(barsRect.left(), y, barsRect.right(), y);
-    }
+                         drawRect.bottom() - (waveRect.bottom() + 5) + 1);
 
     if (!m_waveform.isEmpty()) {
         QPainterPath path;
@@ -69,18 +63,19 @@ void SpectrumWidget::paintEvent(QPaintEvent *event)
                 path.lineTo(x, y);
         }
 
-        p.setPen(QPen(QColor(220, 220, 230), 1.3));
+        p.setPen(QPen(QColor(250, 45, 85, 145), 1.35));
         p.drawPath(path);
 
-        p.setPen(QPen(QColor(70, 75, 85), 1));
+        p.setPen(QPen(QColor(199, 199, 204, 125), 1));
         p.drawLine(waveRect.left(), waveRect.center().y(), waveRect.right(), waveRect.center().y());
     }
 
     if (!m_bars.isEmpty() && barsRect.height() > 0) {
         const int count = m_bars.size();
-        const qreal gap = 3.0;
+        const qreal gap = qBound<qreal>(1.0, barsRect.width() / qreal(count * 5), 2.5);
         const qreal totalGap = gap * (count - 1);
-        const qreal barWidth = qMax<qreal>(2.0, (barsRect.width() - totalGap) / qMax(1, count));
+        const qreal barWidth =
+            qMax<qreal>(0.8, (barsRect.width() - totalGap) / qMax(1, count));
 
         for (int i = 0; i < count; ++i) {
             const qreal value = std::clamp<double>(m_bars[i], 0.0, 1.0);
@@ -91,18 +86,15 @@ void SpectrumWidget::paintEvent(QPaintEvent *event)
                            barWidth,
                            h);
 
-            QColor fillColor(80, 220, 160);
+            QColor fillColor(250, 45, 85, 190);
             if (value > 0.75)
-                fillColor = QColor(255, 190, 80);
+                fillColor = QColor(255, 55, 95);
             if (value > 0.90)
-                fillColor = QColor(255, 120, 100);
+                fillColor = QColor(255, 105, 135);
 
-            p.fillRect(barRect, fillColor);
+            p.setBrush(fillColor);
+            p.setPen(Qt::NoPen);
+            p.drawRoundedRect(barRect, barWidth / 2.0, barWidth / 2.0);
         }
     }
-
-    p.setPen(QColor(120, 128, 140));
-    p.drawText(drawRect.adjusted(8, 4, -8, -4),
-               Qt::AlignTop | Qt::AlignRight,
-               QString::fromUtf8("Spectrum"));
 }

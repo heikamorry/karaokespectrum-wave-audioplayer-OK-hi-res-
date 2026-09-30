@@ -1,26 +1,82 @@
 #include "audioanalyzer.h"
 
 #include <QtMultimedia/QAudioFormat>
-#include <QDebug>
 #include <algorithm>
 #include <cmath>
-
-extern "C" {
-#include <kissfft/kiss_fftr.h>
-}
-
-struct AudioAnalyzer::KissFftRealHandle
-{
-    kiss_fftr_cfg cfg = nullptr;
-    int fftSize = 0;
-};
+#include <complex>
 
 namespace {
 constexpr float kPi = 3.14159265358979323846f;
+constexpr int kMaxFftSize = 65536;
+constexpr int kMaxBarCount = 512;
+constexpr int kMaxWaveformPointCount = 8192;
 
 static inline float clampFloat(float v, float lo, float hi)
 {
     return std::max(lo, std::min(v, hi));
+}
+
+template<typename SampleAt>
+float energyPreservingDownmix(int channels, SampleAt sampleAt)
+{
+    float sumSquares = 0.0f;
+    float strongestSample = 0.0f;
+    for (int channel = 0; channel < channels; ++channel) {
+        float sample = sampleAt(channel);
+        if (!std::isfinite(sample))
+            sample = 0.0f;
+        sample = clampFloat(sample, -1.0f, 1.0f);
+        sumSquares += sample * sample;
+        if (std::fabs(sample) > std::fabs(strongestSample))
+            strongestSample = sample;
+    }
+
+    const float rms = std::sqrt(sumSquares / float(channels));
+    return std::copysign(clampFloat(rms, 0.0f, 1.0f),
+                         strongestSample == 0.0f ? 1.0f : strongestSample);
+}
+
+bool isPowerOfTwo(int value)
+{
+    return value > 0 && (value & (value - 1)) == 0;
+}
+
+void radix2Fft(QVector<std::complex<float>> &values)
+{
+    const int size = values.size();
+
+    for (int i = 1, reversed = 0; i < size; ++i) {
+        int bit = size >> 1;
+        while (reversed & bit) {
+            reversed ^= bit;
+            bit >>= 1;
+        }
+        reversed ^= bit;
+
+        if (i < reversed)
+            std::swap(values[i], values[reversed]);
+    }
+
+    for (int length = 2; length <= size;) {
+        const float angle = -2.0f * kPi / float(length);
+        const std::complex<float> phaseStep(std::cos(angle), std::sin(angle));
+        const int halfLength = length / 2;
+
+        for (int offset = 0; offset < size; offset += length) {
+            std::complex<float> phase(1.0f, 0.0f);
+            for (int i = 0; i < halfLength; ++i) {
+                const std::complex<float> even = values[offset + i];
+                const std::complex<float> odd = values[offset + i + halfLength] * phase;
+                values[offset + i] = even + odd;
+                values[offset + i + halfLength] = even - odd;
+                phase *= phaseStep;
+            }
+        }
+
+        if (length == size)
+            break;
+        length <<= 1;
+    }
 }
 }
 
@@ -28,41 +84,29 @@ AudioAnalyzer::AudioAnalyzer(QObject *parent)
     : QObject(parent),
     m_fftSize(2048),
     m_barCount(48),
-    m_waveformPointCount(256),
-    m_fftHandle(new KissFftRealHandle)
+    m_waveformPointCount(256)
 {
-    ensureFft();
+    m_emitTimer.start();
 }
 
-AudioAnalyzer::~AudioAnalyzer()
-{
-    if (m_fftHandle) {
-        if (m_fftHandle->cfg) {
-            kiss_fftr_free(m_fftHandle->cfg);
-            m_fftHandle->cfg = nullptr;
-        }
-        delete m_fftHandle;
-        m_fftHandle = nullptr;
-    }
-}
+AudioAnalyzer::~AudioAnalyzer() = default;
 
 void AudioAnalyzer::setFftSize(int fftSize)
 {
-    if (fftSize < 256 || (fftSize % 2) != 0)
+    if (fftSize < 256 || fftSize > kMaxFftSize || !isPowerOfTwo(fftSize))
         return;
 
     if (m_fftSize == fftSize)
         return;
 
     m_fftSize = fftSize;
-    ensureFft();
     m_sampleBuffer.clear();
     m_prevBars.clear();
 }
 
 void AudioAnalyzer::setBarCount(int barCount)
 {
-    if (barCount <= 0)
+    if (barCount <= 0 || barCount > kMaxBarCount)
         return;
 
     m_barCount = barCount;
@@ -71,7 +115,7 @@ void AudioAnalyzer::setBarCount(int barCount)
 
 void AudioAnalyzer::setWaveformPointCount(int points)
 {
-    if (points <= 8)
+    if (points <= 8 || points > kMaxWaveformPointCount)
         return;
 
     m_waveformPointCount = points;
@@ -81,27 +125,11 @@ void AudioAnalyzer::reset()
 {
     m_sampleBuffer.clear();
     m_prevBars.clear();
+    m_emitTimer.restart();
 
     QVector<float> emptyBars;
     QVector<float> emptyWave;
     emit spectrumReady(emptyBars, emptyWave);
-}
-
-void AudioAnalyzer::ensureFft()
-{
-    if (!m_fftHandle)
-        return;
-
-    if (m_fftHandle->cfg && m_fftHandle->fftSize == m_fftSize)
-        return;
-
-    if (m_fftHandle->cfg) {
-        kiss_fftr_free(m_fftHandle->cfg);
-        m_fftHandle->cfg = nullptr;
-    }
-
-    m_fftHandle->cfg = kiss_fftr_alloc(m_fftSize, 0, nullptr, nullptr);
-    m_fftHandle->fftSize = m_fftSize;
 }
 
 QVector<float> AudioAnalyzer::extractMonoSamples(const QAudioBuffer &buffer) const
@@ -126,12 +154,10 @@ QVector<float> AudioAnalyzer::extractMonoSamples(const QAudioBuffer &buffer) con
         if (!p)
             return {};
         for (int i = 0; i < frames; ++i) {
-            float sum = 0.0f;
-            for (int ch = 0; ch < channels; ++ch) {
+            mono[i] = energyPreservingDownmix(channels, [&](int ch) {
                 const quint8 v = p[i * channels + ch];
-                sum += (float(v) - 128.0f) / 128.0f;
-            }
-            mono[i] = clampFloat(sum / float(channels), -1.0f, 1.0f);
+                return (float(v) - 128.0f) / 128.0f;
+            });
         }
         break;
     }
@@ -140,11 +166,9 @@ QVector<float> AudioAnalyzer::extractMonoSamples(const QAudioBuffer &buffer) con
         if (!p)
             return {};
         for (int i = 0; i < frames; ++i) {
-            float sum = 0.0f;
-            for (int ch = 0; ch < channels; ++ch) {
-                sum += float(p[i * channels + ch]) / 32768.0f;
-            }
-            mono[i] = clampFloat(sum / float(channels), -1.0f, 1.0f);
+            mono[i] = energyPreservingDownmix(channels, [&](int ch) {
+                return float(p[i * channels + ch]) / 32768.0f;
+            });
         }
         break;
     }
@@ -153,11 +177,9 @@ QVector<float> AudioAnalyzer::extractMonoSamples(const QAudioBuffer &buffer) con
         if (!p)
             return {};
         for (int i = 0; i < frames; ++i) {
-            float sum = 0.0f;
-            for (int ch = 0; ch < channels; ++ch) {
-                sum += float(double(p[i * channels + ch]) / 2147483648.0);
-            }
-            mono[i] = clampFloat(sum / float(channels), -1.0f, 1.0f);
+            mono[i] = energyPreservingDownmix(channels, [&](int ch) {
+                return float(double(p[i * channels + ch]) / 2147483648.0);
+            });
         }
         break;
     }
@@ -166,11 +188,9 @@ QVector<float> AudioAnalyzer::extractMonoSamples(const QAudioBuffer &buffer) con
         if (!p)
             return {};
         for (int i = 0; i < frames; ++i) {
-            float sum = 0.0f;
-            for (int ch = 0; ch < channels; ++ch) {
-                sum += p[i * channels + ch];
-            }
-            mono[i] = clampFloat(sum / float(channels), -1.0f, 1.0f);
+            mono[i] = energyPreservingDownmix(channels, [&](int ch) {
+                return p[i * channels + ch];
+            });
         }
         break;
     }
@@ -204,13 +224,12 @@ QVector<float> AudioAnalyzer::downsampleWaveform(const QVector<float> &samples, 
             continue;
         }
 
-        float peak = 0.0f;
+        float signedPeak = 0.0f;
         for (int j = start; j < end; ++j) {
-            peak = std::max(peak, std::fabs(samples[j]));
+            if (std::fabs(samples[j]) > std::fabs(signedPeak))
+                signedPeak = samples[j];
         }
-
-        float signSample = samples[start];
-        out[i] = (signSample >= 0.0f) ? peak : -peak;
+        out[i] = signedPeak;
     }
 
     return out;
@@ -233,23 +252,22 @@ void AudioAnalyzer::appendSamples(const QVector<float> &samples)
 QVector<float> AudioAnalyzer::computeBars(const QVector<float> &fftInput, int sampleRate)
 {
     QVector<float> bars;
-    if (!m_fftHandle || !m_fftHandle->cfg || fftInput.size() != m_fftSize || sampleRate <= 0)
+    if (fftInput.size() != m_fftSize || !isPowerOfTwo(m_fftSize) || sampleRate <= 0)
         return bars;
 
-    QVector<kiss_fft_scalar> timedata(m_fftSize);
-    QVector<kiss_fft_cpx> freqdata(m_fftSize / 2 + 1);
+    QVector<std::complex<float>> fftData(m_fftSize);
 
     for (int i = 0; i < m_fftSize; ++i) {
         const float hann = 0.5f - 0.5f * std::cos((2.0f * kPi * i) / float(m_fftSize - 1));
-        timedata[i] = fftInput[i] * hann;
+        fftData[i] = std::complex<float>(fftInput[i] * hann, 0.0f);
     }
 
-    kiss_fftr(m_fftHandle->cfg, timedata.data(), freqdata.data());
+    radix2Fft(fftData);
 
     QVector<float> mags(m_fftSize / 2 + 1, 0.0f);
     for (int i = 0; i < mags.size(); ++i) {
-        const float re = freqdata[i].r;
-        const float im = freqdata[i].i;
+        const float re = fftData[i].real();
+        const float im = fftData[i].imag();
         const float mag = std::sqrt(re * re + im * im) / float(m_fftSize);
         mags[i] = mag;
     }
@@ -303,14 +321,22 @@ QVector<float> AudioAnalyzer::computeBars(const QVector<float> &fftInput, int sa
 
 void AudioAnalyzer::processBuffer(const QAudioBuffer &buffer)
 {
-    if (!buffer.isValid())
+    if (!buffer.isValid()) {
+        reset();
         return;
+    }
 
     const QVector<float> mono = extractMonoSamples(buffer);
     if (mono.isEmpty())
         return;
 
     appendSamples(mono);
+
+    // Multimedia backends may deliver very small buffers. Keep all samples
+    // for analysis, but cap FFT/repaint work to roughly 60 frames per second.
+    if (m_emitTimer.isValid() && m_emitTimer.elapsed() < 16)
+        return;
+    m_emitTimer.restart();
 
     QVector<float> waveform = downsampleWaveform(mono, m_waveformPointCount);
 

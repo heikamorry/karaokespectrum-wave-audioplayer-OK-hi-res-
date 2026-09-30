@@ -1,34 +1,38 @@
 {
-  "version": 6,
+  "version": 3,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 19,
+    "minor": 21,
     "patch": 0
   },
   "configurePresets": [
     {
-      "name": "msvc-debug",
-      "displayName": "MSVC Debug (Qt 6.9.3)",
-      "description": "Configure the project for Visual Studio 2022 x64 with Qt 6.9.3.",
-      "generator": "Visual Studio 17 2022",
-      "architecture": {
-        "value": "x64",
-        "strategy": "external"
-      },
-      "binaryDir": "${sourceDir}/build/vscode-msvc",
+      "name": "qt-release",
+      "displayName": "Qt Release",
+      "description": "Set QTDIR to your Qt installation and initialize your compiler environment before configuring.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/qt-release",
       "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install/vscode-msvc",
-        "CMAKE_PREFIX_PATH": "D:/Qt/6.9.3/msvc2022_64"
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "$env{QTDIR}",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/dist",
+        "BUILD_TESTING": "ON"
       }
     }
   ],
   "buildPresets": [
     {
-      "name": "msvc-debug",
-      "displayName": "Build MSVC Debug",
-      "configurePreset": "msvc-debug",
-      "configuration": "Debug"
+      "name": "qt-release",
+      "configurePreset": "qt-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "qt-release",
+      "configurePreset": "qt-release",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

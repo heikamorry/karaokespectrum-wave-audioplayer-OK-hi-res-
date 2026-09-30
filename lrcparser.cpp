@@ -2,25 +2,97 @@
 
 #include <QFile>
 #include <QRegularExpression>
-#include <QTextStream>
 #include <QStringConverter>
+#include <QTextCodec>
 #include <algorithm>
+#include <limits>
+
+namespace {
+
+constexpr qint64 kMaxLrcTimestampMs = 365LL * 24 * 60 * 60 * 1000;
+constexpr qint64 kMaxOffsetMs = 24LL * 60 * 60 * 1000;
+
+bool parseTimestampParts(const QString &minutesText,
+                         const QString &secondsText,
+                         const QString &fractionText,
+                         qint64 &timeMs)
+{
+    bool minutesOk = false;
+    const qint64 minutes = minutesText.toLongLong(&minutesOk);
+    if (!minutesOk || minutes < 0)
+        return false;
+
+    bool secondsOk = false;
+    const int seconds = secondsText.toInt(&secondsOk);
+    if (!secondsOk || seconds < 0 || seconds > 59)
+        return false;
+
+    int milliseconds = 0;
+    if (!fractionText.isEmpty()) {
+        if (fractionText.size() == 1)
+            milliseconds = fractionText.toInt() * 100;
+        else if (fractionText.size() == 2)
+            milliseconds = fractionText.toInt() * 10;
+        else
+            milliseconds = fractionText.left(3).toInt();
+    }
+
+    const qint64 subMinuteMs = qint64(seconds) * 1000 + milliseconds;
+    if (minutes > (kMaxLrcTimestampMs - subMinuteMs) / 60000)
+        return false;
+
+    timeMs = minutes * 60000 + subMinuteMs;
+    return true;
+}
+
+qint64 applyOffset(qint64 timeMs, qint64 offsetMs)
+{
+    return std::clamp(timeMs + offsetMs, qint64(0), kMaxLrcTimestampMs);
+}
+
+QString decodeLrcBytes(const QByteArray &bytes)
+{
+    const auto byteAt = [&bytes](int index) {
+        return static_cast<unsigned char>(bytes.at(index));
+    };
+
+    if (bytes.size() >= 2 && byteAt(0) == 0xff && byteAt(1) == 0xfe) {
+        QStringDecoder decoder(QStringDecoder::Utf16LE);
+        return decoder.decode(bytes.mid(2));
+    }
+    if (bytes.size() >= 2 && byteAt(0) == 0xfe && byteAt(1) == 0xff) {
+        QStringDecoder decoder(QStringDecoder::Utf16BE);
+        return decoder.decode(bytes.mid(2));
+    }
+
+    const int utf8BomLength =
+        bytes.size() >= 3 && byteAt(0) == 0xef && byteAt(1) == 0xbb && byteAt(2) == 0xbf
+        ? 3
+        : 0;
+    QStringDecoder utf8Decoder(QStringDecoder::Utf8);
+    const QString utf8Text = utf8Decoder.decode(bytes.mid(utf8BomLength));
+    if (!utf8Decoder.hasError())
+        return utf8Text;
+
+    if (QTextCodec *gb18030 = QTextCodec::codecForName("GB18030"))
+        return gb18030->toUnicode(bytes);
+    return QString::fromLocal8Bit(bytes);
+}
+
+} // namespace
 
 LrcInfo LrcParser::parseFile(const QString &filePath)
 {
     LrcInfo info;
 
     QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    if (!file.open(QIODevice::ReadOnly))
         return info;
 
-    QTextStream in(&file);
-    in.setEncoding(QStringConverter::Utf8);
-
-    QString text = in.readAll();
+    const QByteArray bytes = file.readAll();
     file.close();
 
-    return parseText(text);
+    return parseText(decodeLrcBytes(bytes));
 }
 
 LrcInfo LrcParser::parseText(const QString &text)
@@ -30,53 +102,53 @@ LrcInfo LrcParser::parseText(const QString &text)
     const QStringList rawLines = text.split(QRegularExpression(R"(\r\n|\n|\r)"),
                                             Qt::KeepEmptyParts);
 
-    QRegularExpression timeTagRe(R"(\[(\d{1,2}):(\d{1,2})([.:](\d{1,3}))?\])");
+    // Metadata, especially [offset], is allowed anywhere in an LRC file.
+    // Resolve it before parsing any timestamps so every line receives the
+    // same final offset.
+    for (QString line : rawLines)
+        parseMetaTag(line.trimmed(), info);
+
+    QRegularExpression timeTagRe(
+        R"(\[(\d+):([0-5]?\d)([.:](\d{1,3}))?\])");
 
     for (QString line : rawLines) {
         line = line.trimmed();
         if (line.isEmpty())
             continue;
 
-        if (parseMetaTag(line, info))
+        LrcInfo ignoredMeta;
+        if (parseMetaTag(line, ignoredMeta))
             continue;
 
-        QRegularExpressionMatchIterator it = timeTagRe.globalMatch(line);
         QVector<qint64> times;
-        int lastTagEnd = 0;
+        int consumed = 0;
 
-        while (it.hasNext()) {
-            QRegularExpressionMatch match = it.next();
+        // Only consume the contiguous timestamp tags at the beginning of the
+        // line. Bracketed times inside the lyric text remain lyric text.
+        while (consumed < line.size()) {
+            const QRegularExpressionMatch match =
+                timeTagRe.match(line, consumed,
+                                QRegularExpression::NormalMatch,
+                                QRegularExpression::AnchorAtOffsetMatchOption);
+            if (!match.hasMatch())
+                break;
 
-            const QString mmStr = match.captured(1);
-            const QString ssStr = match.captured(2);
             const QString fracStr = match.captured(4);
-
-            int mm = mmStr.toInt();
-            int ss = ssStr.toInt();
-            int ms = 0;
-
-            if (!fracStr.isEmpty()) {
-                if (fracStr.size() == 1)
-                    ms = fracStr.toInt() * 100;
-                else if (fracStr.size() == 2)
-                    ms = fracStr.toInt() * 10;
-                else
-                    ms = fracStr.left(3).toInt();
+            qint64 rawTimeMs = 0;
+            if (!parseTimestampParts(match.captured(1), match.captured(2),
+                                     fracStr, rawTimeMs)) {
+                times.clear();
+                break;
             }
 
-            qint64 timeMs = qint64(mm) * 60000 + qint64(ss) * 1000 + ms;
-            timeMs += info.offsetMs;
-            if (timeMs < 0)
-                timeMs = 0;
-
-            times.push_back(timeMs);
-            lastTagEnd = match.capturedEnd();
+            times.push_back(applyOffset(rawTimeMs, info.offsetMs));
+            consumed = match.capturedEnd();
         }
 
         if (times.isEmpty())
             continue;
 
-        const QString lyricText = line.mid(lastTagEnd).trimmed();
+        const QString lyricText = line.mid(consumed).trimmed();
 
         for (qint64 t : times) {
             LrcLine lyricLine;
@@ -107,7 +179,10 @@ void LrcParser::finalizeEndTimes(QVector<LrcLine> &lines, qint64 durationMs)
             if (durationMs > lines[i].startMs)
                 lines[i].endMs = durationMs;
             else
-                lines[i].endMs = lines[i].startMs + 4000;
+                lines[i].endMs =
+                    lines[i].startMs > std::numeric_limits<qint64>::max() - 4000
+                    ? std::numeric_limits<qint64>::max()
+                    : lines[i].startMs + 4000;
         }
 
         if (lines[i].endMs < lines[i].startMs)
@@ -117,27 +192,13 @@ void LrcParser::finalizeEndTimes(QVector<LrcLine> &lines, qint64 durationMs)
 
 bool LrcParser::parseTimeTag(const QString &tag, qint64 &timeMs)
 {
-    QRegularExpression re(R"(^\[(\d{1,2}):(\d{1,2})([.:](\d{1,3}))?\]$)");
+    QRegularExpression re(R"(^\[(\d+):([0-5]?\d)([.:](\d{1,3}))?\]$)");
     QRegularExpressionMatch match = re.match(tag);
     if (!match.hasMatch())
         return false;
 
-    int mm = match.captured(1).toInt();
-    int ss = match.captured(2).toInt();
-    QString fracStr = match.captured(4);
-
-    int ms = 0;
-    if (!fracStr.isEmpty()) {
-        if (fracStr.size() == 1)
-            ms = fracStr.toInt() * 100;
-        else if (fracStr.size() == 2)
-            ms = fracStr.toInt() * 10;
-        else
-            ms = fracStr.left(3).toInt();
-    }
-
-    timeMs = qint64(mm) * 60000 + qint64(ss) * 1000 + ms;
-    return true;
+    return parseTimestampParts(match.captured(1), match.captured(2),
+                               match.captured(4), timeMs);
 }
 
 bool LrcParser::parseMetaTag(const QString &line, LrcInfo &info)
@@ -163,7 +224,7 @@ bool LrcParser::parseMetaTag(const QString &line, LrcInfo &info)
         bool ok = false;
         qint64 offset = value.toLongLong(&ok);
         if (ok)
-            info.offsetMs = offset;
+            info.offsetMs = std::clamp(offset, -kMaxOffsetMs, kMaxOffsetMs);
     }
 
     return true;

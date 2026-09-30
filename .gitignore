@@ -1,4 +1,9 @@
 # C++ objects and libs
+*.obj
+*.lib
+*.exe
+*.pdb
+*.ilk
 *.slo
 *.lo
 *.o
@@ -30,6 +35,11 @@ ui_*.h
 Makefile*
 *build-*
 build/
+dist/
+.qtcreator/
+.vscode/
+.vs/
+CMakeUserPresets.json
 *.qm
 *.prl
 *.qmlls.ini

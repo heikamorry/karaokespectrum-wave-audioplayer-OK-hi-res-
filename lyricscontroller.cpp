@@ -36,8 +36,7 @@ bool LyricsController::loadLrcFile(const QString &lrcFilePath)
         return false;
     }
 
-    if (m_durationMs > 0)
-        LrcParser::finalizeEndTimes(parsed.lines, m_durationMs);
+    LrcParser::finalizeEndTimes(parsed.lines, m_durationMs);
 
     m_info = parsed;
     m_lrcFilePath = lrcFilePath;
@@ -173,6 +172,15 @@ QString LyricsController::findLrcFileForAudio(const QString &audioFilePath) cons
     const QString lrcPath = QDir(dirPath).filePath(baseName + ".lrc");
     if (QFileInfo::exists(lrcPath))
         return lrcPath;
+
+    const QFileInfoList candidates =
+        QDir(dirPath).entryInfoList(QDir::Files | QDir::Readable);
+    for (const QFileInfo &candidate : candidates) {
+        if (candidate.suffix().compare(QStringLiteral("lrc"), Qt::CaseInsensitive) == 0
+            && candidate.completeBaseName().compare(baseName, Qt::CaseInsensitive) == 0) {
+            return candidate.absoluteFilePath();
+        }
+    }
 
     return {};
 }

@@ -1,6 +1,7 @@
 #ifndef AUDIOANALYZER_H
 #define AUDIOANALYZER_H
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QVector>
 #include <QtMultimedia/QAudioBuffer>
@@ -27,7 +28,6 @@ signals:
 private:
     QVector<float> extractMonoSamples(const QAudioBuffer &buffer) const;
     QVector<float> downsampleWaveform(const QVector<float> &samples, int targetCount) const;
-    void ensureFft();
     QVector<float> computeBars(const QVector<float> &fftInput, int sampleRate);
     void appendSamples(const QVector<float> &samples);
 
@@ -38,9 +38,7 @@ private:
 
     QVector<float> m_sampleBuffer;
     QVector<float> m_prevBars;
-
-    struct KissFftRealHandle;
-    KissFftRealHandle *m_fftHandle;
+    QElapsedTimer m_emitTimer;
 };
 
 #endif // AUDIOANALYZER_H

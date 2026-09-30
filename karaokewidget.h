@@ -1,6 +1,7 @@
 #ifndef KARAOKEWIDGET_H
 #define KARAOKEWIDGET_H
 
+#include <QPointer>
 #include <QWidget>
 
 class LyricsController;
@@ -27,7 +28,7 @@ private:
                          qreal progress, const QFont &font);
 
 private:
-    LyricsController *m_controller = nullptr;
+    QPointer<LyricsController> m_controller;
 };
 
 #endif // KARAOKEWIDGET_H
